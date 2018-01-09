@@ -1,0 +1,6 @@
+{
+    "token": "<bot token here>",
+    "name": "<bot name here>",
+    "polling_period_sec": 0.5,
+    "debug": false
+}

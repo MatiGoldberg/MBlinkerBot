@@ -3,29 +3,36 @@ import httplib, urllib, json, time, threading
 
 class BotClient():
 
-	def __init__(self):
-		self.version = '<your bot name here> v0.1 running on <platform>'
-		self.Token = "<your bot token here>"
-		self.BaseUri = "api.telegram.org"
-		self.Path = '/bot' + self.Token + '/{0}'
-		self.connection = httplib.HTTPSConnection(self.BaseUri)
-		self._dispatch = Dispatch(self._send_message, self.version)
-		self.mailbox = Mailbox()
-		self.me = ''
-		self.echo_mode = False
+	base_uri = "api.telegram.org"
 
-	def Test(self):
+	def __init__(self):
+		self._load_configuration()
+		if not self.is_valid:
+			return
+		self.version = '@{0} v0.1 running on RPiZero'.format(self.me)
+		self.connection = httplib.HTTPSConnection(self.base_uri)
+		self.dispatch = BotDispatch(self._send_message, self.version)
+
+	def test(self):
+		if not self.is_valid:
+			return
+
 		response = self._send_request('getMe')
 		if not self._response_is_valid(response):
 			print '>> ERROR: Cannot read response.'
 			self._print_json_object(response)
+			self.is_valid = False
 			return
 
 		result = response['result']
-		self._dispatch.me = '{0} (#{1})'.format(result['username'], result["id"])
+		self.dispatch.me = '{0} (#{1})'.format(result['username'], result["id"])
 		print '>> {0} is alive! [#{1}]'.format(result['first_name'], result['id'])
 		
-	def RunOnce(self):
+	def run_once(self):
+		self.test()
+		if not self.is_valid:
+			return
+
 		updates = self._get_updates()
 		last_update = 0
 		for update in updates:
@@ -38,7 +45,11 @@ class BotClient():
 
 		print '>> last_update: {0}'.format(last_update)
 
-	def RunLoop(self):
+	def run_loop(self):
+		self.test()
+		if not self.is_valid:
+			return
+
 		last_update = 0
 
 		while True:
@@ -49,7 +60,19 @@ class BotClient():
 				except :
 					print '>> ERROR: {0}'.format(update)
 				last_update = update['update_id']
-				time.sleep(0.5)
+				time.sleep(self.polling_period)
+
+	def _load_configuration(self):
+		config = BotConfig()
+		self.is_valid = config.is_valid()
+		if not self.is_valid:
+			print '>> Error: invalid configuration file.'
+			return
+
+		self.path = '/bot' + config.token + '/{0}'
+		self.me = config.name
+		self.polling_period = config.polling_period
+		self.debug_mode = config.debug
 
 	def _get_updates(self, offset = None):
 		params = None
@@ -77,7 +100,7 @@ class BotClient():
 
 	def _handle_update(self, update):
 		
-		u = BotUpdate(update)
+		u = BotUpdateObject(update)
 		if u is None or not update.has_key('message'):
 			print '>> ERROR: cannot read update, skipping'
 			return None
@@ -85,10 +108,10 @@ class BotClient():
 		print '>> update [#{0}]: {1} (@{2})'.format(u.update_id, u.text, u.user)
 		command = u.text.lower()
 		
-		if self.echo_mode:
+		if self.debug_mode:
 			self._send_message(u.chat_id, "you said: " + u.text)
 
-		if not self._dispatch.handle(command, u):
+		if not self.dispatch.handle(command, u):
 			self._local_dispatch(command, u)
 
 	def _local_dispatch(self, command, u):
@@ -110,9 +133,7 @@ class BotClient():
 		if params is not None:
 			query = '?' + urllib.urlencode(params)
 		
-		#print '[DEBUG] Request: ' + self.Path.format(method) + query
-
-		self.connection.request('GET',self.Path.format(method) + query)
+		self.connection.request('GET',self.path.format(method) + query)
 		res = self.connection.getresponse()
 		
 		data = res.read()
@@ -135,7 +156,50 @@ class BotClient():
 		self_._print_json_object(obj)
 
 
-class Dispatch():
+class BotConfig():
+
+	config_file = 'bot.config.json'
+
+	def __init__(self):
+		self.token = None
+		self.name = None
+		self.polling_period = None
+		self.debug = None
+		self.load_config()
+
+	def save_config(self, name='<Bot Name Here>', token ='<Bot Token Here>', polling_period = 0.5):
+		config = {'name' : name, \
+		         'token' : token, \
+		         'polling_period_sec' : str(polling_period)}
+		
+		with open(self.config_file, 'w') as f:
+			f.write(str(json.dumps(config, indent=4, separators=(',', ': '))))
+
+	def load_config(self):
+		with open(self.config_file, 'r') as f:
+			self.config = json.loads(f.read())
+
+		if not self.is_valid():
+			return
+
+		self.token = self.config['token']
+		self.name = self.config['name']
+		if self.config.has_key('debug'):
+			self.debug = self.config['debug']
+		else:
+			self.debug = False
+		if self.config.has_key('polling_period_sec'):
+			self.polling_period = self.config['polling_period_sec']
+		else:
+			self.polling_period = 0.5
+
+	def is_valid(self):
+		return self.config is not None and \
+			   self.config.has_key('name') and self.config.has_key('token') and \
+			   self.config['name'] is not None and self.config['token'] is not None
+
+
+class BotDispatch():
 
 	def __init__(self, send_method, version):
 		self.dispatch = {}
@@ -149,7 +213,6 @@ class Dispatch():
 	def handle(self, command, update):
 		if not self.dispatch.has_key(command):
 			return False
-		#print '[DEBUG] running:', command, update
 		func = self.dispatch[command]
 		func(update)
 		return True
@@ -210,7 +273,8 @@ class Dispatch():
 	def who_are_you(self, u):
 		self._send_message(u.chat_id, "I'm " + self.me)
 
-class BotUpdate():
+
+class BotUpdateObject():
 
 	def __init__(self, update):
 		if update.has_key('update_id'):
@@ -241,12 +305,13 @@ class BotUpdate():
 		if update['message'].has_key('date'):
 			self.date = update['message']['date']
 
+
 class Led():
 
 	def __init__(self, gpio):
 		self.gpio = gpio
 		self.led = None
-		self.period = 0.25
+		self.period = 0.2
 		self.e = threading.Event()
 		self._setup()
 
@@ -285,10 +350,13 @@ class Led():
 			time.sleep(period/2)
 			self.led.off()
 
+
 class PiZero():
 
 	def __init__(self):
 		self.cpu = None
+		self.period = 0.2
+		self.e = threading.Event()
 		self._setup()
 
 	def _setup(self):
@@ -303,4 +371,5 @@ class PiZero():
 			return '{}C'.format(self.cpu.temperature)
 		else:
 			return 'cannot read cpu temperature.'
+
 
